@@ -82,7 +82,7 @@ function OAuth2Strategy(options, verify) {
   if (!options.clientID) { throw new TypeError('OAuth2Strategy requires a clientID option'); }
 
   passport.Strategy.call(this);
-  this.name = 'oauth2';
+  this.name = 'passport-clever-oauth20';
   this._verify = verify;
 
   // NOTE: The _oauth2 property is considered "protected".  Subclasses are
