@@ -1,15 +1,17 @@
 // Load modules.
 var passport = require('passport-strategy')
-  , url = require('url')
-  , util = require('util')
-  , utils = require('./utils')
-  , OAuth2 = require('./clever-oauth/oauth2').OAuth2
-  , NullStateStore = require('./state/null')
-  , SessionStateStore = require('./state/session')
-  , AuthorizationError = require('./errors/authorizationerror')
-  , TokenError = require('./errors/tokenerror')
-  , InternalOAuthError = require('./errors/internaloautherror');
+    , url = require('url')
+    , util = require('util')
+    , utils = require('./utils')
+    , OAuth2 = require('./clever-oauth/oauth2').OAuth2
+    , NullStateStore = require('./state/null')
+    , SessionStateStore = require('./state/session')
+    , AuthorizationError = require('./errors/authorizationerror')
+    , TokenError = require('./errors/tokenerror')
+    , InternalOAuthError = require('./errors/internaloautherror')
+    , request = require('request');
 
+const CLEVER_ME_ENDPOINT = 'https://api.clever.com/v2.0/me';
 
 /**
  * Creates an instance of `OAuth2Strategy`.
@@ -70,44 +72,52 @@ var passport = require('passport-strategy')
  * @api public
  */
 function OAuth2Strategy(options, verify) {
-  if (typeof options == 'function') {
-    verify = options;
-    options = undefined;
-  }
-  options = options || {};
-
-  if (!verify) { throw new TypeError('OAuth2Strategy requires a verify callback'); }
-  if (!options.authorizationURL) { throw new TypeError('OAuth2Strategy requires a authorizationURL option'); }
-  if (!options.tokenURL) { throw new TypeError('OAuth2Strategy requires a tokenURL option'); }
-  if (!options.clientID) { throw new TypeError('OAuth2Strategy requires a clientID option'); }
-
-  passport.Strategy.call(this);
-  this.name = 'passport-clever-oauth20';
-  this._verify = verify;
-
-  // NOTE: The _oauth2 property is considered "protected".  Subclasses are
-  //       allowed to use it when making protected resource requests to retrieve
-  //       the user profile.
-  this._oauth2 = new OAuth2(options.clientID,  options.clientSecret,
-      '', options.authorizationURL, options.tokenURL, options.customHeaders);
-
-  this._callbackURL = options.callbackURL;
-  this._scope = options.scope;
-  this._scopeSeparator = options.scopeSeparator || ' ';
-  this._key = options.sessionKey || ('oauth2:' + url.parse(options.authorizationURL).hostname);
-
-  if (options.store) {
-    this._stateStore = options.store;
-  } else {
-    if (options.state) {
-      this._stateStore = new SessionStateStore({ key: this._key });
-    } else {
-      this._stateStore = new NullStateStore();
+    if (typeof options == 'function') {
+        verify = options;
+        options = undefined;
     }
-  }
-  this._trustProxy = options.proxy;
-  this._passReqToCallback = options.passReqToCallback;
-  this._skipUserProfile = (options.skipUserProfile === undefined) ? false : options.skipUserProfile;
+    options = options || {};
+
+    if (!verify) {
+        throw new TypeError('OAuth2Strategy requires a verify callback');
+    }
+    if (!options.authorizationURL) {
+        throw new TypeError('OAuth2Strategy requires a authorizationURL option');
+    }
+    if (!options.tokenURL) {
+        throw new TypeError('OAuth2Strategy requires a tokenURL option');
+    }
+    if (!options.clientID) {
+        throw new TypeError('OAuth2Strategy requires a clientID option');
+    }
+
+    passport.Strategy.call(this);
+    this.name = 'passport-clever-oauth20';
+    this._verify = verify;
+
+    // NOTE: The _oauth2 property is considered "protected".  Subclasses are
+    //       allowed to use it when making protected resource requests to retrieve
+    //       the user profile.
+    this._oauth2 = new OAuth2(options.clientID, options.clientSecret,
+        '', options.authorizationURL, options.tokenURL, options.customHeaders);
+
+    this._callbackURL = options.callbackURL;
+    this._scope = options.scope;
+    this._scopeSeparator = options.scopeSeparator || ' ';
+    this._key = options.sessionKey || ('oauth2:' + url.parse(options.authorizationURL).hostname);
+
+    if (options.store) {
+        this._stateStore = options.store;
+    } else {
+        if (options.state) {
+            this._stateStore = new SessionStateStore({key: this._key});
+        } else {
+            this._stateStore = new NullStateStore();
+        }
+    }
+    this._trustProxy = options.proxy;
+    this._passReqToCallback = options.passReqToCallback;
+    this._skipUserProfile = (options.skipUserProfile === undefined) ? false : options.skipUserProfile;
 }
 
 // Inherit from `passport.Strategy`.
@@ -120,143 +130,169 @@ util.inherits(OAuth2Strategy, passport.Strategy);
  * @param {Object} req
  * @api protected
  */
-OAuth2Strategy.prototype.authenticate = function(req, options) {
-  options = options || {};
-  var self = this;
+OAuth2Strategy.prototype.authenticate = function (req, options) {
+    options = options || {};
+    var self = this;
 
-  if (req.query && req.query.error) {
-    if (req.query.error == 'access_denied') {
-      return this.fail({ message: req.query.error_description });
+    if (req.query && req.query.error) {
+        if (req.query.error == 'access_denied') {
+            return this.fail({message: req.query.error_description});
+        } else {
+            return this.error(new AuthorizationError(req.query.error_description, req.query.error, req.query.error_uri));
+        }
+    }
+
+    var callbackURL = options.callbackURL || this._callbackURL;
+    if (callbackURL) {
+        var parsed = url.parse(callbackURL);
+        if (!parsed.protocol) {
+            // The callback URL is relative, resolve a fully qualified URL from the
+            // URL of the originating request.
+            callbackURL = url.resolve(utils.originalURL(req, {proxy: this._trustProxy}), callbackURL);
+        }
+    }
+
+    var meta = {
+        authorizationURL: this._oauth2._authorizeUrl,
+        tokenURL: this._oauth2._accessTokenUrl,
+        clientID: this._oauth2._clientId
+    }
+
+    if (req.query && req.query.code) {
+        function loaded(err, ok, state) {
+            if (err) {
+                return self.error(err);
+            }
+            if (!ok) {
+                return self.fail(state, 403);
+            }
+
+            var code = req.query.code;
+
+            var params = self.tokenParams(options);
+            params.grant_type = 'authorization_code';
+            if (callbackURL) {
+                params.redirect_uri = callbackURL;
+            }
+
+            self._oauth2.getOAuthAccessToken(code, params,
+                function (err, accessToken, refreshToken, params) {
+                    if (err) {
+                        console.log("Error getting access token: ", err);
+                        return self.error(self._createOAuthError('Failed to obtain access token', err));
+                    }
+
+                    self._loadUserProfile(accessToken, function (err, profile) {
+                        if (err) {
+                            return self.error(err);
+                        }
+
+                        console.log("PROFILE FROM STRATEGY: ", profile);
+
+
+                        function verified(err, user, info) {
+                            if (err) {
+                                return self.error(err);
+                            }
+                            if (!user) {
+                                return self.fail(info);
+                            }
+
+                            info = info || {};
+                            if (state) {
+                                info.state = state;
+                            }
+                            self.success(user, info);
+                        }
+
+                        try {
+                            if (self._passReqToCallback) {
+                                var arity = self._verify.length;
+                                if (arity == 6) {
+                                    self._verify(req, accessToken, refreshToken, params, profile, verified);
+                                } else { // arity == 5
+                                    self._verify(req, accessToken, refreshToken, profile, verified);
+                                }
+                            } else {
+                                var arity = self._verify.length;
+                                if (arity == 5) {
+                                    self._verify(accessToken, refreshToken, params, profile, verified);
+                                } else { // arity == 4
+                                    self._verify(accessToken, refreshToken, profile, verified);
+                                }
+                            }
+                        } catch (ex) {
+                            return self.error(ex);
+                        }
+                    });
+                }
+            );
+        }
+
+        var state = req.query.state;
+        try {
+            var arity = this._stateStore.verify.length;
+            if (arity == 4) {
+                this._stateStore.verify(req, state, meta, loaded);
+            } else { // arity == 3
+                this._stateStore.verify(req, state, loaded);
+            }
+        } catch (ex) {
+            return this.error(ex);
+        }
     } else {
-      return this.error(new AuthorizationError(req.query.error_description, req.query.error, req.query.error_uri));
-    }
-  }
+        var params = this.authorizationParams(options);
+        params.response_type = 'code';
+        if (callbackURL) {
+            params.redirect_uri = callbackURL;
+        }
+        var scope = options.scope || this._scope;
+        if (scope) {
+            if (Array.isArray(scope)) {
+                scope = scope.join(this._scopeSeparator);
+            }
+            params.scope = scope;
+        }
 
-  var callbackURL = options.callbackURL || this._callbackURL;
-  if (callbackURL) {
-    var parsed = url.parse(callbackURL);
-    if (!parsed.protocol) {
-      // The callback URL is relative, resolve a fully qualified URL from the
-      // URL of the originating request.
-      callbackURL = url.resolve(utils.originalURL(req, { proxy: this._trustProxy }), callbackURL);
-    }
-  }
-  
-  var meta = {
-    authorizationURL: this._oauth2._authorizeUrl,
-    tokenURL: this._oauth2._accessTokenUrl,
-    clientID: this._oauth2._clientId
-  }
+        var state = options.state;
+        if (state) {
+            params.state = state;
 
-  if (req.query && req.query.code) {
-    function loaded(err, ok, state) {
-      if (err) { return self.error(err); }
-      if (!ok) {
-        return self.fail(state, 403);
-      }
-  
-      var code = req.query.code;
+            var parsed = url.parse(this._oauth2._authorizeUrl, true);
+            utils.merge(parsed.query, params);
+            parsed.query['client_id'] = this._oauth2._clientId;
+            delete parsed.search;
+            var location = url.format(parsed);
+            this.redirect(location);
+        } else {
+            function stored(err, state) {
+                if (err) {
+                    return self.error(err);
+                }
 
-      var params = self.tokenParams(options);
-      params.grant_type = 'authorization_code';
-      if (callbackURL) { params.redirect_uri = callbackURL; }
-
-      self._oauth2.getOAuthAccessToken(code, params,
-        function(err, accessToken, refreshToken, params) {
-          if (err) { return self.error(self._createOAuthError('Failed to obtain access token', err)); }
-
-          self._loadUserProfile(accessToken, function(err, profile) {
-            if (err) { return self.error(err); }
-
-            function verified(err, user, info) {
-              if (err) { return self.error(err); }
-              if (!user) { return self.fail(info); }
-              
-              info = info || {};
-              if (state) { info.state = state; }
-              self.success(user, info);
+                if (state) {
+                    params.state = state;
+                }
+                var parsed = url.parse(self._oauth2._authorizeUrl, true);
+                utils.merge(parsed.query, params);
+                parsed.query['client_id'] = self._oauth2._clientId;
+                delete parsed.search;
+                var location = url.format(parsed);
+                self.redirect(location);
             }
 
             try {
-              if (self._passReqToCallback) {
-                var arity = self._verify.length;
-                if (arity == 6) {
-                  self._verify(req, accessToken, refreshToken, params, profile, verified);
-                } else { // arity == 5
-                  self._verify(req, accessToken, refreshToken, profile, verified);
+                var arity = this._stateStore.store.length;
+                if (arity == 3) {
+                    this._stateStore.store(req, meta, stored);
+                } else { // arity == 2
+                    this._stateStore.store(req, stored);
                 }
-              } else {
-                var arity = self._verify.length;
-                if (arity == 5) {
-                  self._verify(accessToken, refreshToken, params, profile, verified);
-                } else { // arity == 4
-                  self._verify(accessToken, refreshToken, profile, verified);
-                }
-              }
             } catch (ex) {
-              return self.error(ex);
+                return this.error(ex);
             }
-          });
         }
-      );
     }
-    
-    var state = req.query.state;
-    try {
-      var arity = this._stateStore.verify.length;
-      if (arity == 4) {
-        this._stateStore.verify(req, state, meta, loaded);
-      } else { // arity == 3
-        this._stateStore.verify(req, state, loaded);
-      }
-    } catch (ex) {
-      return this.error(ex);
-    }
-  } else {
-    var params = this.authorizationParams(options);
-    params.response_type = 'code';
-    if (callbackURL) { params.redirect_uri = callbackURL; }
-    var scope = options.scope || this._scope;
-    if (scope) {
-      if (Array.isArray(scope)) { scope = scope.join(this._scopeSeparator); }
-      params.scope = scope;
-    }
-
-    var state = options.state;
-    if (state) {
-      params.state = state;
-      
-      var parsed = url.parse(this._oauth2._authorizeUrl, true);
-      utils.merge(parsed.query, params);
-      parsed.query['client_id'] = this._oauth2._clientId;
-      delete parsed.search;
-      var location = url.format(parsed);
-      this.redirect(location);
-    } else {
-      function stored(err, state) {
-        if (err) { return self.error(err); }
-
-        if (state) { params.state = state; }
-        var parsed = url.parse(self._oauth2._authorizeUrl, true);
-        utils.merge(parsed.query, params);
-        parsed.query['client_id'] = self._oauth2._clientId;
-        delete parsed.search;
-        var location = url.format(parsed);
-        self.redirect(location);
-      }
-      
-      try {
-        var arity = this._stateStore.store.length;
-        if (arity == 3) {
-          this._stateStore.store(req, meta, stored);
-        } else { // arity == 2
-          this._stateStore.store(req, stored);
-        }
-      } catch (ex) {
-        return this.error(ex);
-      }
-    }
-  }
 };
 
 /**
@@ -271,8 +307,18 @@ OAuth2Strategy.prototype.authenticate = function(req, options) {
  * @param {Function} done
  * @api protected
  */
-OAuth2Strategy.prototype.userProfile = function(accessToken, done) {
-  return done(null, {});
+OAuth2Strategy.prototype.userProfile = function (accessToken, done) {
+    return request({
+        method: 'GET',
+        url: CLEVER_ME_ENDPOINT,
+        headers: {
+            'Authorization': 'Bearer ' + accessToken,
+            'Content-type': 'application/json'
+        }
+    }, function(err, response) {
+        const json = response.toJSON();
+        callback(err, json && json.data || {});
+    });
 };
 
 /**
@@ -288,8 +334,8 @@ OAuth2Strategy.prototype.userProfile = function(accessToken, done) {
  * @return {Object}
  * @api protected
  */
-OAuth2Strategy.prototype.authorizationParams = function(options) {
-  return {};
+OAuth2Strategy.prototype.authorizationParams = function (options) {
+    return {};
 };
 
 /**
@@ -304,8 +350,8 @@ OAuth2Strategy.prototype.authorizationParams = function(options) {
  * @return {Object}
  * @api protected
  */
-OAuth2Strategy.prototype.tokenParams = function(options) {
-  return {};
+OAuth2Strategy.prototype.tokenParams = function (options) {
+    return {};
 };
 
 /**
@@ -323,12 +369,12 @@ OAuth2Strategy.prototype.tokenParams = function(options) {
  * @return {Error}
  * @api protected
  */
-OAuth2Strategy.prototype.parseErrorResponse = function(body, status) {
-  var json = JSON.parse(body);
-  if (json.error) {
-    return new TokenError(json.error_description, json.error, json.error_uri);
-  }
-  return null;
+OAuth2Strategy.prototype.parseErrorResponse = function (body, status) {
+    var json = JSON.parse(body);
+    if (json.error) {
+        return new TokenError(json.error_description, json.error, json.error_uri);
+    }
+    return null;
 };
 
 /**
@@ -338,28 +384,35 @@ OAuth2Strategy.prototype.parseErrorResponse = function(body, status) {
  * @param {Function} done
  * @api private
  */
-OAuth2Strategy.prototype._loadUserProfile = function(accessToken, done) {
-  var self = this;
+OAuth2Strategy.prototype._loadUserProfile = function (accessToken, done) {
+    var self = this;
 
-  function loadIt() {
-    return self.userProfile(accessToken, done);
-  }
-  function skipIt() {
-    return done(null);
-  }
+    function loadIt() {
+        return self.userProfile(accessToken, done);
+    }
 
-  if (typeof this._skipUserProfile == 'function' && this._skipUserProfile.length > 1) {
-    // async
-    this._skipUserProfile(accessToken, function(err, skip) {
-      if (err) { return done(err); }
-      if (!skip) { return loadIt(); }
-      return skipIt();
-    });
-  } else {
-    var skip = (typeof this._skipUserProfile == 'function') ? this._skipUserProfile() : this._skipUserProfile;
-    if (!skip) { return loadIt(); }
-    return skipIt();
-  }
+    function skipIt() {
+        return done(null);
+    }
+
+    if (typeof this._skipUserProfile == 'function' && this._skipUserProfile.length > 1) {
+        // async
+        this._skipUserProfile(accessToken, function (err, skip) {
+            if (err) {
+                return done(err);
+            }
+            if (!skip) {
+                return loadIt();
+            }
+            return skipIt();
+        });
+    } else {
+        var skip = (typeof this._skipUserProfile == 'function') ? this._skipUserProfile() : this._skipUserProfile;
+        if (!skip) {
+            return loadIt();
+        }
+        return skipIt();
+    }
 };
 
 /**
@@ -369,15 +422,18 @@ OAuth2Strategy.prototype._loadUserProfile = function(accessToken, done) {
  * @param {Object|Error} err
  * @api private
  */
-OAuth2Strategy.prototype._createOAuthError = function(message, err) {
-  var e;
-  if (err.statusCode && err.data) {
-    try {
-      e = this.parseErrorResponse(err.data, err.statusCode);
-    } catch (_) {}
-  }
-  if (!e) { e = new InternalOAuthError(message, err); }
-  return e;
+OAuth2Strategy.prototype._createOAuthError = function (message, err) {
+    var e;
+    if (err.statusCode && err.data) {
+        try {
+            e = this.parseErrorResponse(err.data, err.statusCode);
+        } catch (_) {
+        }
+    }
+    if (!e) {
+        e = new InternalOAuthError(message, err);
+    }
+    return e;
 };
 
 
