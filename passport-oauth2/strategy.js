@@ -321,6 +321,8 @@ OAuth2Strategy.prototype.userProfile = function (accessToken, done) {
             return;
         }
 
+        console.log("******** GETTING USER PROFILE *******");
+
         const body = response.body;
         const data = body.data;
         const type = body.type;
