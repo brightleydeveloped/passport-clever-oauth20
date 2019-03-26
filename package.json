@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "body-parser": "1.18.3",
+    "clever": "^0.11.1",
     "cookie-parser": "1.4.3",
     "ejs": "2.4.1",
     "express": "4.16.3",

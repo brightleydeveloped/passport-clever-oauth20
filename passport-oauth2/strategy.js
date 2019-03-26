@@ -9,9 +9,11 @@ var passport = require('passport-strategy')
     , AuthorizationError = require('./errors/authorizationerror')
     , TokenError = require('./errors/tokenerror')
     , InternalOAuthError = require('./errors/internaloautherror')
-    , request = require('request');
+    , request = require('request')
+    , Clever = require('clever');
 
-const CLEVER_ME_ENDPOINT = 'https://api.clever.com/v2.0/me';
+const CLEVER_URL = 'https://api.clever.com';
+const CLEVER_ME_ENDPOINT =  `${CLEVER_URL}/v2.0/me`;
 
 /**
  * Creates an instance of `OAuth2Strategy`.
@@ -187,9 +189,6 @@ OAuth2Strategy.prototype.authenticate = function (req, options) {
                             return self.error(err);
                         }
 
-                        console.log("PROFILE FROM STRATEGY: ", profile);
-
-
                         function verified(err, user, info) {
                             if (err) {
                                 return self.error(err);
@@ -314,10 +313,60 @@ OAuth2Strategy.prototype.userProfile = function (accessToken, done) {
         headers: {
             'Authorization': 'Bearer ' + accessToken,
             'Content-type': 'application/json'
-        }
+        },
+        json: true
     }, function(err, response) {
-        const json = response.toJSON();
-        callback(err, json && json.data || {});
+        if(err) {
+            done(err);
+            return;
+        }
+
+        const body = response.body;
+        const data = body.data;
+        const type = body.type;
+
+        const clever = Clever({token: accessToken});
+
+        // console.log("BODY", body);
+
+        const canonical = body.links && body.links.find(function(link) {
+            return link.rel === 'canonical';
+        });
+
+        // console.log("Fetching Canonical: ", canonical, `${CLEVER_URL}/${canonical.uri}`);
+        request({
+            method: 'GET',
+            url: `${CLEVER_URL}${canonical.uri}`,
+            headers: {
+                'Authorization': 'Bearer ' + accessToken,
+                'Content-type': 'application/json'
+            },
+            json: true
+        }, function(error, response) {
+            const data = response.body.data;
+            /**
+             *
+             district: '5c85a12f5c2b97000128535f',
+             [0]         email: 'avery.thompson.139360@example.com',
+             [0]         name: [Object],
+             [0]         schools: [],
+             [0]         id: '5c86c63236376010e4596717'
+
+             */
+
+            data.username = data.email;
+            data.displayName = data.name && data.name.first || '';
+            if(data.displayName) {
+                data.displayName += " ";
+            }
+            data.displayName += data.name && data.name.middle || '';
+            if(data.name && data.name.middle) {
+                data.displayName += " ";
+            }
+            data.displayName += data.name && data.name.last || '';
+
+            done(error, data || {});
+        });
     });
 };
 
