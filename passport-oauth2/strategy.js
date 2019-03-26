@@ -367,6 +367,8 @@ OAuth2Strategy.prototype.userProfile = function (accessToken, done) {
             }
             data.displayName += data.name && data.name.last || '';
 
+		        console.log("******** DATA *******", error, data);
+
             done(error, data || {});
         });
     });
